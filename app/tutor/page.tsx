@@ -24,6 +24,12 @@ import {
   MessageCircle,
 } from "lucide-react"
 
+const timeFormatter = new Intl.DateTimeFormat("en-US", {
+  hour: "2-digit",
+  minute: "2-digit",
+  hour12: true,
+})
+
 interface Message {
   id: string
   content: string
@@ -31,6 +37,10 @@ interface Message {
   timestamp: Date
   type?: "text" | "image" | "voice"
   subject?: string
+  // Base64 image data and mime type to send to API
+  imageData?: { data: string; mimeType: string; name?: string }
+  // Local preview URL (data URL or object URL) for rendering
+  imageUrl?: string
 }
 
 const quickHelp = [
@@ -53,12 +63,14 @@ export default function AITutor() {
   const [inputMessage, setInputMessage] = useState("")
   const [isRecording, setIsRecording] = useState(false)
   const [isTyping, setIsTyping] = useState(false)
-  const scrollAreaRef = useRef<HTMLDivElement>(null)
+  const bottomRef = useRef<HTMLDivElement>(null)
+
+  // File inputs for image upload
+  const fileInputRef = useRef<HTMLInputElement>(null)
+  const cameraInputRef = useRef<HTMLInputElement>(null)
 
   useEffect(() => {
-    if (scrollAreaRef.current) {
-      scrollAreaRef.current.scrollTop = scrollAreaRef.current.scrollHeight
-    }
+    bottomRef.current?.scrollIntoView({ block: "end" })
   }, [messages])
 
   // Call our API route backed by Gemini
@@ -170,6 +182,75 @@ export default function AITutor() {
     }
   }
 
+  // Handle selected image files
+  const handleFiles = async (files: FileList | null) => {
+    const file = files?.[0]
+    if (!file) return
+
+    // Limit size to ~2MB to keep request manageable
+    const maxSize = 2 * 1024 * 1024
+    if (file.size > maxSize) {
+      const warning: Message = {
+        id: (Date.now() + 3).toString(),
+        content: "Image is too large. Please select an image under 2MB.",
+        sender: "ai",
+        timestamp: new Date(),
+        type: "text",
+      }
+      setMessages((prev) => [...prev, warning])
+      return
+    }
+
+    const dataUrl: string = await new Promise((resolve, reject) => {
+      const reader = new FileReader()
+      reader.onload = () => resolve(reader.result as string)
+      reader.onerror = reject
+      reader.readAsDataURL(file)
+    })
+
+    // Extract base64 data and mime
+    const [prefix, base64] = dataUrl.split(",")
+    const mimeMatch = /^data:(.*?);base64$/.exec(prefix || "")
+    const mimeType = mimeMatch?.[1] || file.type || "image/*"
+
+    const imageMessage: Message = {
+      id: Date.now().toString(),
+      content: "", // optional caption can be added via input in the future
+      sender: "user",
+      timestamp: new Date(),
+      type: "image",
+      imageUrl: dataUrl,
+      imageData: { data: base64 || "", mimeType, name: file.name },
+    }
+
+    const nextMessages = [...messages, imageMessage]
+    setMessages(nextMessages)
+    setIsTyping(true)
+
+    try {
+      const text = await requestAIReply(nextMessages)
+      const aiResponse: Message = {
+        id: (Date.now() + 1).toString(),
+        content: text,
+        sender: "ai",
+        timestamp: new Date(),
+        type: "text",
+      }
+      setMessages((prev) => [...prev, aiResponse])
+    } catch (e: any) {
+      const aiResponse: Message = {
+        id: (Date.now() + 2).toString(),
+        content: `Error: ${e?.message || "Unable to get response right now."}`,
+        sender: "ai",
+        timestamp: new Date(),
+        type: "text",
+      }
+      setMessages((prev) => [...prev, aiResponse])
+    } finally {
+      setIsTyping(false)
+    }
+  }
+
   return (
     <div className="min-h-screen bg-background">
       <Navigation />
@@ -223,9 +304,9 @@ export default function AITutor() {
                 </Badge>
               </CardTitle>
             </CardHeader>
-            <CardContent className="flex-1 flex flex-col p-0">
+            <CardContent className="flex-1 flex flex-col p-0 min-h-0">
               {/* Messages */}
-              <ScrollArea className="flex-1 p-4" ref={scrollAreaRef}>
+              <ScrollArea className="flex-1 min-h-0 p-4">
                 <div className="space-y-4">
                   {messages.map((message) => (
                     <div
@@ -240,13 +321,26 @@ export default function AITutor() {
                         </Avatar>
                       )}
                       <div
-                        className={`max-w-[80%] rounded-lg p-3 ${
+                        className={`max-w-[80%] rounded-lg p-3 overflow-hidden ${
                           message.sender === "user"
                             ? "bg-primary text-primary-foreground"
                             : "bg-muted text-muted-foreground"
                         }`}
                       >
-                        <p className="text-sm">{message.content}</p>
+                        {/* Render image if present */}
+                        {message.type === "image" && message.imageUrl ? (
+                          <div className="mb-2">
+                            {/* eslint-disable-next-line @next/next/no-img-element */}
+                            <img
+                              src={message.imageUrl}
+                              alt={message.imageData?.name || "Uploaded image"}
+                              className="rounded-md max-h-64 w-auto object-contain"
+                            />
+                          </div>
+                        ) : null}
+                        {message.content ? (
+                          <p className="text-sm break-words whitespace-pre-wrap">{message.content}</p>
+                        ) : null}
                         {message.subject && (
                           <Badge variant="outline" className="mt-2 text-xs">
                             {message.subject}
@@ -254,8 +348,8 @@ export default function AITutor() {
                         )}
                         <div className="flex items-center gap-2 mt-2 text-xs opacity-70">
                           <Clock className="h-3 w-3" />
-                          <span>
-                            {message.timestamp.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })}
+                          <span suppressHydrationWarning>
+                            {timeFormatter.format(new Date(message.timestamp))}
                           </span>
                         </div>
                       </div>
@@ -288,16 +382,17 @@ export default function AITutor() {
                       </div>
                     </div>
                   )}
+                  <div ref={bottomRef} />
                 </div>
               </ScrollArea>
 
               {/* Input */}
               <div className="border-t p-4">
                 <div className="flex items-center gap-2">
-                  <Button variant="outline" size="sm">
+                  <Button variant="outline" size="sm" onClick={() => cameraInputRef.current?.click()}>
                     <Camera className="h-4 w-4" />
                   </Button>
-                  <Button variant="outline" size="sm">
+                  <Button variant="outline" size="sm" onClick={() => fileInputRef.current?.click()}>
                     <ImageIcon className="h-4 w-4" />
                   </Button>
                   <Button
@@ -312,12 +407,29 @@ export default function AITutor() {
                     value={inputMessage}
                     onChange={(e) => setInputMessage(e.target.value)}
                     placeholder="Ask me anything about your studies..."
-                    onKeyPress={(e) => e.key === "Enter" && handleSendMessage()}
+                    onKeyDown={(e) => e.key === "Enter" && handleSendMessage()}
                     className="flex-1"
                   />
                   <Button onClick={handleSendMessage} disabled={!inputMessage.trim()}>
                     <Send className="h-4 w-4" />
                   </Button>
+
+                  {/* Hidden file inputs */}
+                  <input
+                    ref={fileInputRef}
+                    type="file"
+                    accept="image/*"
+                    className="hidden"
+                    onChange={(e) => handleFiles(e.target.files)}
+                  />
+                  <input
+                    ref={cameraInputRef}
+                    type="file"
+                    accept="image/*"
+                    capture="environment"
+                    className="hidden"
+                    onChange={(e) => handleFiles(e.target.files)}
+                  />
                 </div>
                 {isRecording && (
                   <div className="flex items-center gap-2 mt-2 text-sm text-destructive">
