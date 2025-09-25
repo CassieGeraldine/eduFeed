@@ -8,6 +8,7 @@ import { Input } from "@/components/ui/input"
 import { Badge } from "@/components/ui/badge"
 import { ScrollArea } from "@/components/ui/scroll-area"
 import { Avatar, AvatarFallback } from "@/components/ui/avatar"
+import { useToast } from "@/components/ui/use-toast"
 import {
   Bot,
   Send,
@@ -22,6 +23,8 @@ import {
   Clock,
   Star,
   MessageCircle,
+  Volume2,
+  StopCircle,
 } from "lucide-react"
 
 interface Message {
@@ -41,6 +44,7 @@ const quickHelp = [
 ]
 
 export default function AITutor() {
+  const { toast } = useToast()
   const [messages, setMessages] = useState<Message[]>([
     {
       id: "1",
@@ -55,11 +59,50 @@ export default function AITutor() {
   const [isTyping, setIsTyping] = useState(false)
   const scrollAreaRef = useRef<HTMLDivElement>(null)
 
+  // Speech Recognition refs/state
+  const recognitionRef = useRef<any>(null)
+  const [isSpeechSupported, setIsSpeechSupported] = useState(false)
+
+  // Speech Synthesis (TTS)
+  const [isTtsSupported, setIsTtsSupported] = useState(false)
+  const synthRef = useRef<SpeechSynthesis | null>(null)
+  const utteranceRef = useRef<SpeechSynthesisUtterance | null>(null)
+  const [speakingId, setSpeakingId] = useState<string | null>(null)
+
   useEffect(() => {
     if (scrollAreaRef.current) {
       scrollAreaRef.current.scrollTop = scrollAreaRef.current.scrollHeight
     }
   }, [messages])
+
+  useEffect(() => {
+    // Feature-detect SpeechRecognition once on mount (client-only)
+    const SpeechRecognition =
+      typeof window !== "undefined" && ((window as any).SpeechRecognition || (window as any).webkitSpeechRecognition)
+    setIsSpeechSupported(!!SpeechRecognition)
+
+    // Detect speech synthesis
+    if (typeof window !== "undefined" && "speechSynthesis" in window) {
+      synthRef.current = window.speechSynthesis
+      setIsTtsSupported(true)
+    }
+
+    return () => {
+      // Cleanup recognition on unmount
+      try {
+        recognitionRef.current?.stop?.()
+      } catch {}
+      recognitionRef.current = null
+      setIsRecording(false)
+
+      // Stop any ongoing speech
+      try {
+        synthRef.current?.cancel()
+      } catch {}
+      utteranceRef.current = null
+      setSpeakingId(null)
+    }
+  }, [])
 
   // Call our API route backed by Gemini
   const requestAIReply = async (fullConversation: Message[], subject?: string): Promise<string> => {
@@ -159,15 +202,120 @@ export default function AITutor() {
     }
   }
 
-  const toggleRecording = () => {
-    setIsRecording(!isRecording)
-    // Mock voice recording functionality
-    if (!isRecording) {
-      setTimeout(() => {
-        setIsRecording(false)
-        setInputMessage("Can you help me with fractions?")
-      }, 3000)
+  // Real speech recognition handlers
+  const startRecording = () => {
+    const SpeechRecognition = (typeof window !== "undefined" && ((window as any).SpeechRecognition || (window as any).webkitSpeechRecognition)) as any
+    if (!SpeechRecognition) {
+      toast({
+        title: "Voice not supported",
+        description: "Your browser doesn't support speech recognition.",
+      })
+      return
     }
+    if (recognitionRef.current) {
+      // Already running
+      return
+    }
+
+    try {
+      const recognition = new SpeechRecognition()
+      recognition.lang = (typeof navigator !== "undefined" && (navigator as any).language) || "en-US"
+      recognition.interimResults = true
+      recognition.maxAlternatives = 1
+
+      let finalTranscript = ""
+
+      recognition.onstart = () => {
+        setIsRecording(true)
+      }
+
+      recognition.onresult = (event: any) => {
+        let interim = ""
+        for (let i = event.resultIndex; i < event.results.length; i++) {
+          const res = event.results[i]
+          if (res.isFinal) finalTranscript += res[0].transcript
+          else interim += res[0].transcript
+        }
+        const combined = `${finalTranscript} ${interim}`.trim()
+        setInputMessage(combined)
+      }
+
+      recognition.onerror = (e: any) => {
+        setIsRecording(false)
+        recognitionRef.current = null
+        const err = e?.error || "Recognition failed"
+        // silence 'no-speech' as it's common when user cancels quickly
+        if (err !== "no-speech") {
+          toast({ title: "Voice error", description: String(err) })
+        }
+      }
+
+      recognition.onend = () => {
+        setIsRecording(false)
+        recognitionRef.current = null
+        setInputMessage((prev) => prev.trim())
+      }
+
+      recognitionRef.current = recognition
+      recognition.start()
+    } catch (e: any) {
+      setIsRecording(false)
+      recognitionRef.current = null
+      toast({ title: "Voice error", description: e?.message || "Unable to start microphone." })
+    }
+  }
+
+  const stopRecording = () => {
+    try {
+      recognitionRef.current?.stop?.()
+    } catch {}
+    recognitionRef.current = null
+    setIsRecording(false)
+  }
+
+  const toggleRecording = () => {
+    if (!isSpeechSupported) {
+      toast({ title: "Voice not supported", description: "Try Chrome on desktop or Android." })
+      return
+    }
+    if (isRecording) stopRecording()
+    else startRecording()
+  }
+
+  // TTS controls
+  const speakText = (id: string, text: string) => {
+    if (!isTtsSupported || !text.trim()) return
+    try {
+      synthRef.current?.cancel()
+    } catch {}
+
+    const utter = new SpeechSynthesisUtterance(text)
+    utter.lang = (typeof navigator !== "undefined" && (navigator as any).language) || "en-US"
+    utter.onstart = () => setSpeakingId(id)
+    utter.onend = () => {
+      setSpeakingId(null)
+      utteranceRef.current = null
+    }
+    utter.onerror = () => {
+      setSpeakingId(null)
+      utteranceRef.current = null
+      toast({ title: "Voice playback error", description: "Unable to play audio." })
+    }
+    utteranceRef.current = utter
+
+    try {
+      synthRef.current?.speak(utter)
+    } catch (e: any) {
+      toast({ title: "Voice playback error", description: e?.message || "Playback failed." })
+    }
+  }
+
+  const stopSpeaking = () => {
+    try {
+      synthRef.current?.cancel()
+    } catch {}
+    utteranceRef.current = null
+    setSpeakingId(null)
   }
 
   return (
@@ -252,6 +400,30 @@ export default function AITutor() {
                             {message.subject}
                           </Badge>
                         )}
+                        {/* TTS controls for AI messages */}
+                        {message.sender === "ai" && isTtsSupported && message.content && (
+                          <div className="mt-2">
+                            <Button
+                              variant="outline"
+                              size="sm"
+                              onClick={() =>
+                                speakingId === message.id
+                                  ? stopSpeaking()
+                                  : speakText(message.id, message.content)
+                              }
+                            >
+                              {speakingId === message.id ? (
+                                <>
+                                  <StopCircle className="h-4 w-4 mr-2" /> Stop
+                                </>
+                              ) : (
+                                <>
+                                  <Volume2 className="h-4 w-4 mr-2" /> Listen
+                                </>
+                              )}
+                            </Button>
+                          </div>
+                        )}
                         <div className="flex items-center gap-2 mt-2 text-xs opacity-70">
                           <Clock className="h-3 w-3" />
                           <span>
@@ -305,6 +477,8 @@ export default function AITutor() {
                     size="sm"
                     onClick={toggleRecording}
                     className={isRecording ? "bg-destructive text-destructive-foreground" : ""}
+                    disabled={!isSpeechSupported && !isRecording}
+                    title={isSpeechSupported ? undefined : "Speech recognition not supported"}
                   >
                     {isRecording ? <MicOff className="h-4 w-4" /> : <Mic className="h-4 w-4" />}
                   </Button>

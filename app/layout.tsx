@@ -5,6 +5,7 @@ import { GeistMono } from "geist/font/mono"
 import { Analytics } from "@vercel/analytics/next"
 import { Suspense } from "react"
 import "./globals.css"
+import { WhatsAppButton } from "@/components/whatsapp-button"
 
 export const metadata: Metadata = {
   title: "MwanAfrika - Learning Feeds the Future",
@@ -21,6 +22,7 @@ export default function RootLayout({
     <html lang="en">
       <body className={`font-sans ${GeistSans.variable} ${GeistMono.variable} antialiased`}>
         <Suspense fallback={null}>{children}</Suspense>
+        <WhatsAppButton />
         <Analytics />
       </body>
     </html>
